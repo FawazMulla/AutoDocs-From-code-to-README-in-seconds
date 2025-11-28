@@ -5,15 +5,20 @@ import git
 import tempfile
 import re
 import stat
-import ast
 
 # --- CONFIGURATION ---
 STD_LIBS = {
-    'python': {'os', 'sys', 're', 'json', 'math', 'datetime', 'time', 'random', 'subprocess', 'typing', 'collections', 'threading', 'asyncio', 'logging'},
-    'node': {'fs', 'path', 'http', 'https', 'os', 'util', 'events', 'crypto', 'child_process', 'cluster', 'dns', 'net', 'stream'}
+    'python': {'os', 'sys', 're', 'json', 'math', 'datetime', 'time', 'random', 'subprocess', 'typing', 'collections', 'threading', 'asyncio', 'logging', 'argparse'},
+    'node': {'fs', 'path', 'http', 'https', 'os', 'util', 'events', 'crypto', 'child_process', 'cluster', 'dns', 'net', 'stream', 'querystring'},
+    'java': {'java.lang', 'java.util', 'java.io', 'java.net', 'java.math'},
+    'go': {'fmt', 'os', 'net', 'time', 'encoding', 'sync', 'strings', 'strconv', 'io', 'log'}
 }
 
-IGNORE_DIRS = {'.git', 'node_modules', 'venv', '.env', '__pycache__', 'dist', 'build', 'target', 'vendor', '.idea', '.vscode', 'coverage', '.next', '__mocks__'}
+IGNORE_DIRS = {
+    '.git', 'node_modules', 'venv', '.env', '__pycache__', 
+    'dist', 'build', 'target', 'vendor', '.idea', '.vscode', 
+    'coverage', '.next', '__mocks__', 'assets', 'bin', 'obj', 'out', '.settings'
+}
 
 class DeepScanner:
     def __init__(self, path, custom_context=""):
@@ -24,21 +29,23 @@ class DeepScanner:
         self.temp_dir = None
         self.metadata = {
             "project_name": "",
-            "username": "username", # For badges
-            "repo_name": "repo",    # For badges
+            "username": "username",
+            "repo_name": "repo",
+            "repo_url": "<repo_url>",
             "languages": set(),
             "tech_stack": set(),
-            "dependencies": {"Python": set(), "Node.js": set(), "Go": set()},
+            "dependencies": {"Python": set(), "Node.js": set(), "Java": set(), "Go": set()},
             "scripts": {},
             "structure": "",
             "description": "",
-            "entry_point": None,
+            "entry_point": None,      # The actual file (e.g., main.py)
+            "entry_point_cmd": None,  # The command class/func (e.g., Main class)
             "api_endpoints": [],
             "license": "Unlicensed",
-            "modules": [],
-            "flow": [],
-            "env_vars": set(), # NEW: Stores detected environment variables
-            "tests": []        # NEW: Stores detected test frameworks
+            "modules": [],            # Classes/Modules for architecture
+            "env_vars": set(),
+            "tests": [],
+            "build_tools": set()      # Maven, Gradle, Poetry, etc.
         }
 
     def setup_path(self):
@@ -47,8 +54,7 @@ class DeepScanner:
             try:
                 git.Repo.clone_from(self.original_path, self.temp_dir)
                 self.path = self.temp_dir
-                
-                # Extract Git Info for Badges
+                self.metadata["repo_url"] = self.original_path
                 parts = self.original_path.rstrip('/').split('/')
                 if len(parts) >= 2:
                     self.metadata["repo_name"] = parts[-1].replace('.git', '')
@@ -61,16 +67,14 @@ class DeepScanner:
             if not os.path.exists(self.path):
                 raise Exception("Local path does not exist.")
             self.metadata["project_name"] = os.path.basename(os.path.normpath(self.path))
-            
-            # Try to read local git config for badges
             try:
                 repo = git.Repo(self.path)
                 url = repo.remotes.origin.url
+                self.metadata["repo_url"] = url
                 parts = url.rstrip('/').replace('.git', '').split('/')
                 self.metadata["repo_name"] = parts[-1]
-                self.metadata["username"] = parts[-2].split(':')[-1] # Handle git@github.com:user/repo
+                self.metadata["username"] = parts[-2].split(':')[-1]
             except: pass
-
         return self.path
 
     def cleanup(self):
@@ -94,18 +98,21 @@ class DeepScanner:
         langs = list(self.metadata["languages"])
         stack = list(self.metadata["tech_stack"])
         
-        ptype = "Application"
+        ptype = "Software Solution"
         if "Api" in name: ptype = "RESTful API"
-        elif "Web" in name: ptype = "Web Platform"
-        elif "Lib" in name: ptype = "Library"
+        elif "Web" in name or "Ui" in name: ptype = "Web Application"
+        elif "Lib" in name or "Sdk" in name: ptype = "Library"
+        elif "Management" in name or "System" in name: ptype = "Management System"
         
-        framework = ""
-        for t in stack:
-            if "Framework" in t: framework = t.split(': ')[1]; break
+        desc = f"**{name}** is a {ptype}"
+        if langs: desc += f" built with **{langs[0]}**"
         
-        desc = f"**{name}** is a robust {ptype}"
-        if framework: desc += f" built with **{framework}**"
-        elif langs: desc += f" built using **{langs[0]}**"
+        frameworks = [t.split(': ')[1] for t in stack if 'Framework' in t]
+        dbs = [t.split(': ')[1] for t in stack if 'Database' in t]
+        
+        if frameworks: desc += f", leveraging **{frameworks[0]}** for the architecture"
+        if dbs: desc += f" and **{dbs[0]}** for data storage"
+        
         desc += "."
         return desc
 
@@ -117,7 +124,7 @@ class DeepScanner:
                         content = lic_file.read(100).upper()
                         if "MIT" in content: self.metadata["license"] = "MIT"
                         elif "APACHE" in content: self.metadata["license"] = "Apache 2.0"
-                        elif "GNU" in content or "GPL" in content: self.metadata["license"] = "GPL"
+                        elif "GNU" in content: self.metadata["license"] = "GPL"
                         else: self.metadata["license"] = "See LICENSE file"
                 except: pass
                 break
@@ -132,28 +139,36 @@ class DeepScanner:
             if rel_path == '.': level = 0
             else: level += 1
 
-            if level < 3:
+            if level < 4:
                 indent = '│   ' * level
                 subindent = '├── '
                 if level > 0: tree_lines.append(f"{indent}{subindent}{os.path.basename(root)}/")
                 for f in files:
-                    if not f.startswith('.'): tree_lines.append(f"{indent}│   {f}")
+                    if f.endswith(('.java', '.py', '.js', '.ts', '.go', '.json', '.xml', '.md', '.yml')):
+                        tree_lines.append(f"{indent}│   {f}")
 
             for f in files:
                 filepath = os.path.join(root, f)
                 ext = os.path.splitext(f)[1]
                 
-                if f == 'package.json':
+                # Config & Build Tools
+                if f == 'package.json': 
                     self.metadata["languages"].add("Node.js")
                     self._parse_package_json(filepath)
-                elif f == 'requirements.txt':
+                elif f == 'requirements.txt': 
                     self.metadata["languages"].add("Python")
                     self._parse_requirements(filepath)
-                elif f == 'go.mod': self.metadata["languages"].add("Go")
-                elif f == 'pom.xml': self.metadata["languages"].add("Java")
-                elif f == 'Dockerfile': self.metadata["tech_stack"].add("DevOps: Docker")
+                elif f == 'pom.xml': 
+                    self.metadata["languages"].add("Java")
+                    self.metadata["build_tools"].add("Maven")
+                elif f == 'build.gradle': 
+                    self.metadata["languages"].add("Java")
+                    self.metadata["build_tools"].add("Gradle")
+                elif f == 'go.mod': 
+                    self.metadata["languages"].add("Go")
 
-                if ext in ['.py', '.js', '.ts', '.jsx', '.go']:
+                # Code Analysis
+                if ext in ['.py', '.js', '.ts', '.java', '.go']:
                     self._analyze_code(filepath, ext)
 
         self.metadata["structure"] = "```text\n.\n" + "\n".join(tree_lines) + "\n```"
@@ -163,238 +178,234 @@ class DeepScanner:
             with open(filepath) as f:
                 data = json.load(f)
                 if data.get('name'): self.metadata["project_name"] = data.get('name')
-                deps = list(data.get('dependencies', {}).keys())
-                devDeps = list(data.get('devDependencies', {}).keys())
                 
+                # Entry point from package.json
+                if data.get('main'): 
+                    self.metadata["entry_point"] = data.get('main')
+                    
+                deps = list(data.get('dependencies', {}).keys())
                 self.metadata["dependencies"]["Node.js"].update(deps)
                 self.metadata["scripts"] = data.get('scripts', {})
                 if data.get('description'): self.metadata["description"] = data.get('description')
-                
-                # Check for Test Frameworks
-                for d in deps + devDeps:
-                    if d in ['jest', 'mocha', 'chai', 'supertest']:
-                        self.metadata["tests"].append(d)
         except: pass
 
     def _parse_requirements(self, filepath):
         try:
             with open(filepath) as f:
-                deps = [line.split('==')[0].split('>=')[0].strip() for line in f if line.strip() and not line.startswith('#')]
+                deps = [line.split('==')[0].strip() for line in f if line.strip() and not line.startswith('#')]
                 self.metadata["dependencies"]["Python"].update(deps)
-                # Check for Test Frameworks
-                for d in deps:
-                    if d in ['pytest', 'unittest', 'nose']: self.metadata["tests"].append(d)
         except: pass
 
     def _analyze_code(self, filepath, ext):
         try:
             with open(filepath, 'r', errors='ignore', encoding='utf-8') as f:
                 content = f.read()
-
-                # Entry Point
-                if "app.listen" in content or "run(host=" in content or 'if __name__ == "__main__":' in content:
-                    self.metadata["entry_point"] = os.path.basename(filepath)
-
-                # Environment Variables Scanning (Regex)
-                # Matches: process.env.API_KEY or os.environ['DB_PASS'] or os.getenv('HOST')
-                env_matches = re.findall(r'(?:process\.env\.|os\.environ\.get\([\'"]|os\.getenv\([\'"]|os\.environ\[[\'"])([A-Z_][A-Z0-9_]*)', content)
-                for env in env_matches:
-                    if env not in ["NODE_ENV", "PRODUCTION"]:
-                        self.metadata["env_vars"].add(env)
-
+                fname = os.path.basename(filepath)
+                
+                # --- PYTHON ---
                 if ext == '.py':
-                    if "class " in content:
-                        classes = re.findall(r'class\s+(\w+)', content)
-                        for c in classes: self.metadata["modules"].append(c)
+                    if 'if __name__ == "__main__":' in content or 'app.run(' in content:
+                        self.metadata["entry_point"] = fname
                     
-                    if "def process" in content or "def handler" in content:
-                        self.metadata["flow"].append(f"Logic --> {os.path.basename(filepath)}")
+                    # Capture Classes for Diagram
+                    classes = re.findall(r'class\s+(\w+)', content)
+                    for c in classes: self.metadata["modules"].append(c)
 
-                    endpoints = re.findall(r'@(?:app|router)\.(get|post|put|delete)\([\'"](.+?)[\'"]\)', content)
-                    for method, url in endpoints:
-                        self.metadata["api_endpoints"].append(f"{method.upper()} {url}")
-                    
+                    # Imports
                     imports = re.findall(r'^(?:from|import)\s+([\w-]+)', content, re.MULTILINE)
-                    for imp in imports: self._add_dep('python', imp)
-
-                elif ext in ['.js', '.ts', '.jsx']:
-                    imports = re.findall(r'(?:import\s+.*\s+from|require)\s*[\'"]([@\w/-]+)[\'"]', content)
                     for imp in imports: 
-                        if not imp.startswith('.'): self._add_dep('node', imp)
+                        if imp not in STD_LIBS['python']: 
+                            self.metadata["dependencies"]["Python"].add(imp)
+
+                # --- NODE.JS ---
+                elif ext in ['.js', '.ts']:
+                    if 'app.listen' in content or 'server.listen' in content:
+                        self.metadata["entry_point"] = fname
                     
-                    if "mongoose.connect" in content: self.metadata["flow"].append("App --> Database")
+                    imports = re.findall(r'(?:require|from)\s*[\'"]([@\w/-]+)[\'"]', content)
+                    for imp in imports:
+                        if not imp.startswith('.') and imp not in STD_LIBS['node']:
+                            self.metadata["dependencies"]["Node.js"].add(imp)
+
+                # --- GO ---
+                elif ext == '.go':
+                    if 'func main()' in content:
+                        self.metadata["entry_point"] = fname
+                    
+                    imports = re.findall(r'"([\w/]+)"', content)
+                    for imp in imports:
+                        if '.' in imp and '/' in imp: # Heuristic for external lib in Go
+                            self.metadata["dependencies"]["Go"].add(imp)
+
+                # --- JAVA ---
+                elif ext == '.java':
+                    class_match = re.search(r'class\s+(\w+)', content)
+                    if class_match:
+                        self.metadata["modules"].append(class_match.group(1))
+                        
+                    if "public static void main" in content:
+                        self.metadata["entry_point"] = fname
+                        if class_match:
+                            self.metadata["entry_point_cmd"] = class_match.group(1) # Class Name
+                    
+                    imports = re.findall(r'import\s+([\w\.]+);', content)
+                    for imp in imports:
+                        if not any(x in imp for x in ['java.lang', 'java.util', 'java.io']):
+                            self.metadata["dependencies"]["Java"].add(imp)
+
+                # Env Vars (Universal)
+                env_matches = re.findall(r'(?:process\.env\.|os\.environ\.get\([\'"]|os\.getenv\([\'"])([A-Z_]+)', content)
+                for env in env_matches: self.metadata["env_vars"].add(env)
+
         except: pass
 
-    def _add_dep(self, lang, lib):
-        if lang == 'python':
-            if lib not in STD_LIBS['python']:
-                self.metadata["dependencies"]["Python"].add(lib)
-                if lib in ['flask', 'django', 'fastapi']: self.metadata["tech_stack"].add(f"Framework: {lib.capitalize()}")
-                if lib in ['sqlalchemy', 'pymongo', 'psycopg2']: self.metadata["tech_stack"].add(f"Database: {lib.capitalize()}")
-        elif lang == 'node':
-            if lib not in STD_LIBS['node']:
-                self.metadata["dependencies"]["Node.js"].add(lib)
-
     def generate_diagrams(self):
-        # ... (Same as previous version, retained for brevity) ...
-        diagrams = ""
-        chart = "```mermaid\ngraph TD\n    User[User] --> UI[Client]\n"
-        backend = self.metadata["entry_point"] or "Server"
-        chart += f"    UI --> {backend}\n"
+        chart = "```mermaid\ngraph TD\n"
         
-        for tech in self.metadata["tech_stack"]:
-            clean_tech = tech.split(': ')[1]
-            if "Database" in tech: chart += f"    {backend} --> {clean_tech}[({clean_tech})]\n"
-            elif "Framework" in tech: chart += f"    {clean_tech} --> {backend}\n"
+        # Scenario A: Java/Python Class Diagram
+        if ( "Java" in self.metadata["languages"] or "Python" in self.metadata["languages"] ) and self.metadata["modules"]:
+            entry = self.metadata["entry_point_cmd"] or self.metadata["entry_point"] or "Main"
+            if entry.endswith('.py') or entry.endswith('.java'): entry = entry.split('.')[0]
+            
+            chart += f"    {entry} --> Logic_Layer\n"
+            for mod in self.metadata["modules"][:6]:
+                if mod != entry: chart += f"    Logic_Layer --> {mod}\n"
         
-        if len(self.metadata["tech_stack"]) == 0 and self.metadata["modules"]:
-             for mod in self.metadata["modules"][:4]: chart += f"    {backend} --> {mod}\n"
+        # Scenario B: Node/Go Component Diagram
+        else:
+            chart += "    User[User] --> UI[Client]\n"
+            backend = self.metadata["entry_point"] or "Server"
+            chart += f"    UI --> {backend}\n"
+            
+            # Map Frameworks/DBs
+            for dep in self.metadata["dependencies"].get("Node.js", []) | self.metadata["dependencies"].get("Python", []):
+                if dep in ['mongoose', 'mongodb', 'pg', 'mysql', 'sequelize']:
+                    chart += f"    {backend} --> {dep}[({dep} DB)]\n"
+                elif dep in ['redis', 'ioredis']:
+                    chart += f"    {backend} --> {dep}(({dep} Cache))\n"
+
         chart += "```\n\n"
-        
-        flow = "```mermaid\nsequenceDiagram\n    participant User\n    participant System\n"
-        has_db = any("Database" in t for t in self.metadata["tech_stack"])
-        if has_db: flow += "    participant DB as Database\n"
-        flow += "    User->>System: Request\n    System->>System: Process Logic\n"
-        if has_db: flow += "    System->>DB: Query Data\n    DB-->>System: Return Data\n"
-        flow += "    System-->>User: Response\n```"
-        return "**System Architecture**\n" + chart + "**Data Flow**\n" + flow
+        return "**Architecture**\n" + chart
 
     def build_markdown(self, template="Detailed"):
         m = self.metadata
         langs = sorted(list(m["languages"]))
-        if not langs and m["dependencies"]["Python"]: langs.append("Python")
-        if not langs and m["dependencies"]["Node.js"]: langs.append("Node.js")
-
-        md = ""
         
-        # --- NEW MINIMAL (FORMERLY DETAILED) ---
+        md = f"# {m['project_name']}\n\n"
+        
         if template == "Minimal":
-            md += f"# {m['project_name']}\n\n"
-            for l in langs: md += f"![{l}](https://img.shields.io/badge/Language-{l}-blue) "
-            md += f"\n\n## 📝 Description\n{m['description']}\n\n"
-            if self.custom_context: md += f"> **Context:** {self.custom_context}\n\n"
-            
-            md += "## 📑 Table of Contents\n- [Architecture](#-architecture)\n- [Installation](#-installation)\n- [Usage](#-usage)\n\n"
-            
-            md += "## 🏗 Architecture\n" + self.generate_diagrams() + "\n\n"
-            md += "## ⚙️ Installation\n" + self._generate_strict_install(langs)
-            md += "## 🚀 Usage\n" + self._generate_strict_usage(langs)
-            
-            if m["api_endpoints"]:
-                md += "## 🔌 API Reference\n| Method | Endpoint |\n|---|---|\n"
-                for ep in m["api_endpoints"][:5]:
-                    parts = ep.split(' ')
-                    md += f"| **{parts[0]}** | `{parts[1]}` |\n"
-            
-            md += f"\n## 📄 License\n**{m['license']}**"
-            return md
-
-        # --- NEW DETAILED (ENTERPRISE GRADE) ---
-        
-        # 1. Header with Advanced Badges
-        md += f"# {m['project_name']}\n\n"
-        user = m['username']
-        repo = m['repo_name']
-        
-        # GitHub Live Badges
-        if user != "username":
-            md += f"[![GitHub Stars](https://img.shields.io/github/stars/{user}/{repo}?style=social)](https://github.com/{user}/{repo}/stargazers) "
-            md += f"[![GitHub Forks](https://img.shields.io/github/forks/{user}/{repo}?style=social)](https://github.com/{user}/{repo}/network/members) "
-            md += f"[![GitHub Issues](https://img.shields.io/github/issues/{user}/{repo})](https://github.com/{user}/{repo}/issues) "
-            md += f"[![License](https://img.shields.io/github/license/{user}/{repo})](https://github.com/{user}/{repo}/blob/main/LICENSE)\n\n"
-        else:
-            # Fallback badges
             for l in langs: md += f"![{l}](https://img.shields.io/badge/Language-{l}-blue) "
             md += "\n\n"
+            md += f"## 📝 Description\n{m['description']}\n\n"
+            if self.custom_context: md += f"> **Context:** {self.custom_context}\n\n"
+            md += "## 🛠 Tech Stack\n" + ", ".join(langs) + "\n\n"
+            md += "## ⚙️ Installation\n" + self._generate_strict_install(langs)
+            md += "## 🚀 Usage\n" + self._generate_strict_usage(langs)
+            md += f"## 📄 License\n{m['license']}"
+            return md
+
+        # Detailed
+        if m['username'] != "username":
+            user, repo = m['username'], m['repo_name']
+            md += f"[![Stars](https://img.shields.io/github/stars/{user}/{repo}?style=social)](https://github.com/{user}/{repo}/stargazers) "
+            md += f"[![Forks](https://img.shields.io/github/forks/{user}/{repo}?style=social)](https://github.com/{user}/{repo}/network/members)\n"
+        else:
+            for l in langs: md += f"![{l}](https://img.shields.io/badge/Language-{l}-blue) "
+        md += f"![License](https://img.shields.io/badge/License-{m['license'].replace(' ', '_')}-green)\n\n"
 
         md += f"## 📝 Description\n{m['description']}\n\n"
         if self.custom_context: md += f"> **Developer Note:** {self.custom_context}\n\n"
+        
+        md += "![Screenshot](https://via.placeholder.com/800x400?text=Project+Screenshot)\n\n"
 
-        # 2. Expanded Table of Contents
-        md += "## 📑 Table of Contents\n"
-        md += "- [Features](#-features)\n- [Architecture](#-architecture)\n- [Tech Stack](#-tech-stack)\n- [Prerequisites](#-prerequisites)\n- [Environment Variables](#-environment-variables)\n- [Installation](#-installation)\n- [Running Tests](#-running-tests)\n- [Usage](#-usage)\n- [Deployment](#-deployment)\n- [Contributing](#-contributing)\n\n"
+        md += "## 📑 Table of Contents\n- [Architecture](#-architecture)\n- [Project Structure](#-project-structure)\n- [Installation](#-installation)\n- [Usage](#-usage)\n"
+        if m["dependencies"]["Java"] or m["dependencies"]["Python"] or m["dependencies"]["Node.js"]: md += "- [Dependencies](#-dependencies)\n"
+        md += "- [License](#-license)\n\n"
 
-        # 3. Features (Placeholder)
-        md += "## ✨ Features\n"
-        md += "- [x] " + (f"RESTful API endpoints" if m["api_endpoints"] else "Core Logic Implementation") + "\n"
-        md += "- [x] " + (f"Database Integration ({list(m['tech_stack'])[0].split(':')[1]})" if m['tech_stack'] else "Modular Architecture") + "\n"
-        md += "- [ ] User Authentication (Planned)\n- [ ] CI/CD Pipeline\n\n"
-
-        # 4. Architecture
         md += "## 🏗 Architecture\n" + self.generate_diagrams() + "\n\n"
-
-        # 5. Tech Stack Table
-        md += "## 🛠 Tech Stack\n| Category | Technology |\n|---|---|\n"
-        md += f"| **Languages** | {', '.join(langs)} |\n"
-        if m["tech_stack"]: md += f"| **Frameworks** | {', '.join([t.split(':')[1] for t in m['tech_stack'] if 'Framework' in t])} |\n"
-        if any("Database" in t for t in m["tech_stack"]): md += f"| **Database** | {', '.join([t.split(':')[1] for t in m['tech_stack'] if 'Database' in t])} |\n"
-        md += "\n"
-
-        # 6. Environment Variables (NEW)
-        if m["env_vars"]:
-            md += "## 🔐 Environment Variables\n"
-            md += "Create a `.env` file in the root directory:\n\n"
-            md += "| Variable | Description |\n|---|---|\n"
-            for env in m["env_vars"]:
-                md += f"| `{env}` | Config value for {env.replace('_', ' ').title()} |\n"
-            md += "\n"
-
-        # 7. Installation
+        md += "## 📂 Project Structure\n" + m["structure"] + "\n\n"
         md += "## ⚙️ Installation\n" + self._generate_strict_install(langs)
-
-        # 8. Testing (NEW)
-        if m["tests"]:
-            md += "## 🧪 Running Tests\nTo execute the test suite:\n```bash\n"
-            if "jest" in m["tests"]: md += "npm test\n"
-            elif "pytest" in m["tests"]: md += "pytest\n"
-            elif "go" in langs: md += "go test ./...\n"
-            md += "```\n\n"
-
-        # 9. Usage
         md += "## 🚀 Usage\n" + self._generate_strict_usage(langs)
 
-        # 10. Deployment (NEW)
-        if "DevOps: Docker" in m["tech_stack"]:
-            md += "## 🐳 Deployment (Docker)\n"
-            md += "```bash\n# Build image\ndocker build -t my-app .\n# Run container\ndocker run -p 3000:3000 my-app\n```\n\n"
-        
-        # 11. Contributing
-        md += "## 🤝 Contributing\n1. Fork the Project\n2. Create your Feature Branch (`git checkout -b feature/AmazingFeature`)\n3. Commit your Changes (`git commit -m 'Add some AmazingFeature'`)\n4. Push to the Branch (`git push origin feature/AmazingFeature`)\n5. Open a Pull Request\n\n"
-        
-        md += f"## 📄 License\nDistributed under the **{m['license']}**."
-        
+        # Dependencies
+        for l in langs:
+            if m["dependencies"].get(l):
+                md += f"## 📦 Dependencies ({l})\n"
+                for d in list(m["dependencies"][l])[:10]:
+                    md += f"- `{d}`\n"
+                md += "\n"
+
+        md += "## 🤝 Contributing\n1. Fork the Project\n2. Create your Feature Branch\n3. Commit your Changes\n4. Push to the Branch\n5. Open a Pull Request\n\n"
+        md += f"## 📄 License\nThis project is licensed under the **{m['license']}**."
         return md
 
     def _generate_strict_install(self, langs):
-        steps = "1. **Clone the repository**\n   ```bash\n   git clone <repo_url>\n   ```\n"
+        steps = f"1. **Clone the repository**\n   ```bash\n   git clone {self.metadata['repo_url']}\n   cd {self.metadata['project_name']}\n   ```\n"
+        
+        if "Node.js" in langs:
+            steps += "2. **Node.js Setup**\n   ```bash\n   npm install\n   ```\n"
+
         if "Python" in langs:
             steps += "2. **Python Setup**\n   ```bash\n   python -m venv venv\n   source venv/bin/activate\n"
-            if self.metadata["dependencies"]["Python"]:
-                 libs = " ".join(list(self.metadata["dependencies"]["Python"])[:8])
-                 steps += f"   pip install {libs}\n"
-            elif os.path.exists(os.path.join(self.path, 'requirements.txt')):
+            if os.path.exists(os.path.join(self.path, 'requirements.txt')):
                  steps += "   pip install -r requirements.txt\n"
+            else:
+                 steps += "   pip install " + " ".join(list(self.metadata["dependencies"]["Python"])[:5]) + "\n"
             steps += "   ```\n"
-        if "Node.js" in langs: steps += "2. **Node.js Setup**\n   ```bash\n   npm install\n   ```\n"
+
+        if "Java" in langs:
+            steps += "2. **Java Setup**\n"
+            if "Maven" in self.metadata["build_tools"]:
+                steps += "   ```bash\n   mvn clean install\n   ```\n"
+            elif "Gradle" in self.metadata["build_tools"]:
+                steps += "   ```bash\n   ./gradlew build\n   ```\n"
+            else:
+                steps += "   ```bash\n   # Raw Java Project: Compile manually\n   javac *.java\n   ```\n"
+
+        if "Go" in langs:
+             steps += "2. **Go Setup**\n   ```bash\n   go mod tidy\n   ```\n"
+             
         return steps
 
     def _generate_strict_usage(self, langs):
         cmd = ""
+        
         if "Node.js" in langs:
-            cmd += "**Node:**\n"
-            if self.metadata["scripts"]:
-                cmd += "| Command | Action |\n|---|---|\n"
-                for k,v in self.metadata["scripts"].items():
-                    if k in ['start', 'dev', 'test']: cmd += f"| `npm run {k}` | {v} |\n"
-                cmd += "\n"
+            cmd += "**Node.js:**\n"
+            if "start" in self.metadata["scripts"]:
+                cmd += "```bash\nnpm start\n```\n"
             else:
                 entry = self.metadata["entry_point"] or "index.js"
                 cmd += f"```bash\nnode {entry}\n```\n"
+
         if "Python" in langs:
             cmd += "**Python:**\n"
             entry = self.metadata["entry_point"] or "main.py"
-            cmd += f"```bash\npython {entry}\n```\n"
-        if not cmd: cmd += "```bash\n# Run main entry point\n```\n"
+            # Detect FastAPI/Flask specifically for run command
+            if "fastapi" in self.metadata["dependencies"]["Python"]:
+                cmd += f"```bash\nuvicorn {entry.replace('.py','')}:app --reload\n```\n"
+            else:
+                cmd += f"```bash\npython {entry}\n```\n"
+
+        if "Java" in langs:
+            cmd += "**Java:**\n"
+            if "Maven" in self.metadata["build_tools"]:
+                cmd += "```bash\nmvn spring-boot:run\n```\n"
+            elif "Gradle" in self.metadata["build_tools"]:
+                cmd += "```bash\n./gradlew bootRun\n```\n"
+            else:
+                entry_cls = self.metadata["entry_point_cmd"]
+                entry_file = self.metadata["entry_point"]
+                if entry_cls and entry_file:
+                    cmd += f"```bash\njavac {entry_file}\njava {entry_cls}\n```\n"
+                else:
+                    cmd += "```bash\njavac Main.java\njava Main\n```\n"
+                    
+        if "Go" in langs:
+            cmd += "**Go:**\n"
+            entry = self.metadata["entry_point"] or "main.go"
+            cmd += f"```bash\ngo run {entry}\n```\n"
+
         return cmd
 
 def generate_readme(path, template, context):
